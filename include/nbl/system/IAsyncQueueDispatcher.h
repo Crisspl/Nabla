@@ -17,6 +17,8 @@ namespace impl
     public:
         struct request_base_t
         {
+            // TODO since c++20 we can get rid of both mutex and cvar
+            // and do wait/notify on atomic itself
             std::mutex mtx;
             // wait on this for result to be ready
             std::condition_variable cvar;
@@ -39,11 +41,19 @@ namespace impl
     };
 }
 
+/**
+* Provided RequestType may optionally define 2 member functions:
+* void lock();
+* void unlock();
+* lock() will be called just before processing the request, and unlock() will be called just after processing the request.
+* Those are to enable safe external write access to the request struct for user-defined purposes.
+*/
 template <typename CRTP, typename RequestType, uint32_t BufferSize = 256u, typename InternalStateType = void>
 class IAsyncQueueDispatcher : public IThreadHandler<CRTP, InternalStateType>, public impl::IAsyncQueueDispatcherBase
 {
     static_assert(std::is_base_of_v<impl::IAsyncQueueDispatcherBase::request_base_t, RequestType>, "Request type must derive from request_base_t!");
     static_assert(BufferSize>0u, "BufferSize must not be 0!");
+    static_assert(core::isPoT(BufferSize), "BufferSize must be power of two!");
 
     using base_t = IThreadHandler<CRTP, InternalStateType>;
     friend base_t;
@@ -59,15 +69,8 @@ class IAsyncQueueDispatcher : public IThreadHandler<CRTP, InternalStateType>, pu
 
     static inline counter_t wrapAround(counter_t x)
     {
-        if constexpr (core::isPoT(BufferSize))
-        {
-            constexpr counter_t Mask = static_cast<counter_t>(BufferSize) - static_cast<counter_t>(1);
-            return x & Mask;
-        }
-        else
-        {
-            return x % BufferSize;
-        }
+        constexpr counter_t Mask = static_cast<counter_t>(BufferSize) - static_cast<counter_t>(1);
+        return x & Mask;
     }
 
 public:
@@ -86,12 +89,24 @@ public:
     //void exit(internal_state_t* state); // optional, no `state` parameter in case of no internal state
 
     //void request_impl(request_t& req, ...); // `...` are parameteres forwarded from request()
+    //bool process_request_predicate(const request_t& req); // optional, always true if not provided
     //void process_request(request_t& req, internal_state_t& state); // no `state` parameter in case of no internal state
     ///////
+
+    using base_t::base_t;
 
     template <typename... Args>
     request_t& request(Args&&... args)
     {
+        // should acquire mutex only in case of queue thread being asleep
+        // + allows for concurrent requests submission
+        // this is needed so that queue thread wakeup signal is not missed
+        // https://stackoverflow.com/questions/4544234/calling-pthread-cond-signal-without-locking-mutex
+        // but still not 100% safe:
+        // * try_lock() w/o a reason
+        // * queue thread might start waiting on cvar between try_lock() and notify()
+        auto queue_thread_lk = base_t::tryCreateLock();
+
         auto virtualIx = cb_end++;
         auto safe_begin = virtualIx<MaxRequestCount ? static_cast<counter_t>(0) : (virtualIx-MaxRequestCount+1u);
 
@@ -122,6 +137,12 @@ public:
         return req;
     }
 
+protected:
+    bool process_request_predicate(const request_t& req)
+    {
+        return true;
+    }
+
 private:
     template <typename... Args>
     void work(lock_t& lock, Args&&... optional_internal_state)
@@ -143,7 +164,10 @@ private:
 #endif
         auto lk = req.lock();
 
-        static_cast<CRTP*>(this)->process_request(req, optional_internal_state...);
+        if (static_cast<CRTP*>(this)->process_request_predicate(req))
+        {
+            static_cast<CRTP*>(this)->process_request(req, optional_internal_state...);
+        }
 
         req.ready_for_work = false;
         req.ready = true;
