@@ -6,11 +6,12 @@
 #include "nbl/core/IReferenceCounted.h"
 #include "nbl/core/containers/CCircularBuffer.h"
 #include "nbl/core/SRange.h"
+#include "nbl/ui/KeyCodes.h"
 
 namespace nbl {
 namespace ui
 {
-
+class IWindow;
 class IInputEventChannel : public core::IReferenceCounted
 {
 protected:
@@ -45,7 +46,7 @@ namespace impl
         std::mutex m_bgEventBufMtx;
         cb_t m_bgEventBuf;
         cb_t m_frontEventBuf;
-
+    public:
         // Lock while working with background event buffer
         std::unique_lock<std::mutex> lockBackgroundBuffer()
         {
@@ -96,7 +97,34 @@ namespace impl
 
 struct SMouseEvent
 {
-    // TODO
+    enum E_EVENT_TYPE : uint8_t
+    {
+        EET_CLICK = 1,
+        EET_SCROLL = 2, 
+        EET_MOVEMENT = 4
+    } type;
+    union
+    {
+        struct SClickEvent
+        {
+            int16_t clickPosX, clickPosY;
+            ui::E_MOUSE_BUTTON mouseButton;
+            enum E_ACTION : uint8_t
+            {
+                EA_PRESSED = 1,
+                EA_RELEASED = 2
+            } action;
+        } clickEvent;
+        struct SScrollEvent
+        {
+            int16_t verticalScroll, horizontalScroll;
+        } scrollEvent;
+        struct SMovementEvent
+        {
+            int16_t movementX, movementY;
+        } movementEvent;
+    };
+    IWindow* window;
 };
 
 class IMouseEventChannel : public impl::IEventChannelBase<SMouseEvent>
@@ -107,19 +135,30 @@ protected:
     virtual ~IMouseEventChannel() = default;
 
 public:
+    IMouseEventChannel(size_t circular_buffer_capacity) : base_t(circular_buffer_capacity)
+    {
+
+    }
     using base_t::base_t;
 
     E_TYPE getType() const override final
-    {
+    { 
         return ET_MOUSE;
     }
 };
 
 struct SKeyboardEvent
 {
-    // TODO
+    enum E_KEY_ACTION : uint8_t
+    {
+        ECA_PRESSED = 1,
+        ECA_RELEASED = 2
+    } action;
+    ui::E_KEY_CODE keyCode;
+    IWindow* window;
 };
 
+// TODO left/right shift/ctrl/alt kb flags
 class IKeyboardEventChannel : public impl::IEventChannelBase<SKeyboardEvent>
 {
     using base_t = impl::IEventChannelBase<SKeyboardEvent>;
@@ -129,6 +168,10 @@ protected:
 
 public:
     using base_t::base_t;
+    IKeyboardEventChannel(size_t circular_buffer_capacity) : base_t(circular_buffer_capacity)
+    {
+
+    }
 
     E_TYPE getType() const override final
     {
